@@ -1,187 +1,236 @@
-// Sightline dashboard: renders window.RADAR (written by main.ts beside this
-// page as ../data.js). No framework, no network. Hash routes: #p=<slug>
-// opens a protocol's detail, #cat=<category> applies the category filter.
+// Sightline's dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and renders
+// the ranked board, a filterable table, a per-protocol detail view and the method. No network: every
+// byte it shows is in data.js. The page recomputes nothing the program did not already compute; the
+// numbers it shows are the program's own rows, so the screenshots and the code agree.
+(function () {
+  'use strict';
 
-const R = window.RADAR;
-const meta = R.meta;
-const rows = R.rows;
-const main = document.getElementById('board');
+  var DATA = window.RADAR;
+  if (!DATA) return;
+  var rows = DATA.rows || [];
 
-const state = { q: '', cat: '', verdict: '', watch: false, sort: 'value', detail: null };
+  var state = { q: '', category: 'all', verdict: 'all', watch: false, sort: 'rank', dir: 1, selected: null };
 
-function money(n) {
-  if (n === null || n === undefined) return '—';
-  const neg = n < 0 ? '-' : '';
-  const a = Math.abs(n);
-  if (a >= 1e9) return `${neg}$${(a / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `${neg}$${(a / 1e6).toFixed(1)}M`;
-  if (a >= 1e3) return `${neg}$${(a / 1e3).toFixed(1)}K`;
-  return `${neg}$${a.toFixed(0)}`;
-}
-function moneyFull(n) {
-  return '$' + Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-}
-function pct(x) { return `${(x * 100).toFixed(1)}%`; }
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        if (k === 'class') node.className = attrs[k];
+        else if (k === 'text') node.textContent = attrs[k];
+        else if (k === 'html') node.innerHTML = attrs[k];
+        else if (k.slice(0, 2) === 'on') node.addEventListener(k.slice(2), attrs[k]);
+        else node.setAttribute(k, attrs[k]);
+      });
+    }
+    for (var i = 2; i < arguments.length; i++) {
+      var child = arguments[i];
+      if (child === null || child === undefined) continue;
+      if (Array.isArray(child)) child.forEach(function (c) { if (c) node.appendChild(c); });
+      else if (typeof child === 'string') node.appendChild(document.createTextNode(child));
+      else node.appendChild(child);
+    }
+    return node;
+  }
 
-function variantRow(v) {
-  const win = meta.model.name.startsWith(`Variant ${v.id}`);
-  return `<tr class="${win ? 'winner' : ''}"><td class="l"><b>${v.id}</b> — ${esc(v.label)}${win ? ' · selected' : ''}</td>` +
-    `<td class="num">${v.wf_median_err.toFixed(3)}</td><td class="num">${pct(v.wf_within2x)}</td>` +
-    `<td class="num">${v.blind_median_err.toFixed(3)}</td><td class="num">${pct(v.blind_within2x)}</td></tr>`;
-}
+  function fmtUsd(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    var a = Math.abs(n);
+    var sign = n < 0 ? '-' : '';
+    if (a >= 1e9) return sign + '$' + (a / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return sign + '$' + (a / 1e6).toFixed(2) + 'M';
+    if (a >= 1e3) return sign + '$' + (a / 1e3).toFixed(1) + 'K';
+    return sign + '$' + Math.round(a);
+  }
+  function fmtPct(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function fmtNum(n, digits) {
+    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    return n.toFixed(digits === undefined ? 2 : digits);
+  }
 
-function validationPanel() {
-  const a = meta.model.variants.find((v) => v.id === 'A');
-  const win = meta.model.variants.find((v) => meta.model.name.startsWith(`Variant ${v.id}`));
-  const terms = meta.model.terms_kept.length
-    ? `Terms the walk-forward selection kept for variant C: <b>${meta.model.terms_kept.join(', ')}</b>. A term stayed only if it cut the time-split median error by at least 0.005.`
-    : 'Variant C kept no extra term under the 0.005 improvement rule.';
-  return `<section class="panel"><h2>Model validation — tested out of sample, not in sample</h2>
-  <p>Four candidate models were fitted on the snapshot's ${meta.comps_n} traded comps and scored two ways:
-  an expanding walk-forward time-split ordered by listing date (3 folds), and five seeded blind 75/25 holdouts.
-  The winner was picked on walk-forward median |log10 error|; a gap under 0.01 counts as a tie for the simpler model.
-  Winner <b>${esc(meta.model.name)}</b> scores ${win.wf_median_err.toFixed(3)} walk-forward against the flat multiple's ${a.wf_median_err.toFixed(3)}.
-  ${terms}</p>
-  <table><thead><tr><th class="l">Variant</th><th>WF median err</th><th>WF within 2×</th><th>Blind median err</th><th>Blind within 2×</th></tr></thead>
-  <tbody>${meta.model.variants.map(variantRow).join('')}</tbody></table>
-  <p>Every value band and rank range on this board comes from ${meta.model.bootstrap_refits} bootstrap refits of the winning model on resampled comps.</p></section>`;
-}
+  // ---- header, KPIs, validation -------------------------------------------------
+  $('asof').textContent = 'Snapshot ' + DATA.as_of + ' · ' + DATA.n_comps + ' traded comps · model ' + DATA.model_name;
 
-function categories() {
-  return [...new Set(rows.map((r) => r.category ?? '(none)'))].sort();
-}
+  var winnerScore = null;
+  DATA.variant_scores.forEach(function (s) { if (s.variant === DATA.winner) winnerScore = s; });
+  var kpis = [
+    [String(DATA.board_size), 'pre-token protocols ranked'],
+    [DATA.watchlist_size + '/40', 'watchlist covered'],
+    [String(DATA.n_comps), 'traded comps fitted'],
+    [winnerScore ? winnerScore.wf_median.toFixed(4) : 'n/a', 'walk-forward median log error'],
+    [String(DATA.verdict_counts.farm || 0), 'farm verdicts'],
+    [String((DATA.verdict_counts.thin || 0) + (DATA.verdict_counts.skip || 0)), 'thin + skip verdicts'],
+  ];
+  kpis.forEach(function (k) {
+    $('kpis').appendChild(el('div', { class: 'kpi' }, el('b', { text: k[0] }), el('span', { text: k[1] })));
+  });
 
-function filtered() {
-  let out = rows.filter((r) =>
-    (state.cat === '' || (r.category ?? '(none)') === state.cat) &&
-    (state.verdict === '' || r.verdict === state.verdict) &&
-    (!state.watch || r.watchlist) &&
-    (state.q === '' || `${r.name} ${r.slug}`.toLowerCase().includes(state.q.toLowerCase())));
-  const by = {
-    value: (a, b) => b.implied_p50 - a.implied_p50,
-    tvl: (a, b) => b.tvl - a.tvl,
-    net: (a, b) => b.net - a.net,
-    uph: (a, b) => b.usd_per_hour - a.usd_per_hour,
-    range: (a, b) => (a.rank_hi - a.rank_lo) - (b.rank_hi - b.rank_lo),
-  };
-  return out.sort(by[state.sort] ?? by.value);
-}
+  var v = $('validation');
+  v.appendChild(el('h2', { text: 'Validation — the model earned its place' }));
+  v.appendChild(el('p', { class: 'muted', text: 'Four variants scored on the same snapshot: a walk-forward time-split (comps ordered by listing date, 3 expanding folds, ' + DATA.n_wf + ' test predictions) and a blind holdout (5 seeded 75/25 splits, ' + DATA.n_blind + ' test predictions). The winner is the lowest walk-forward median |log10 error|; within 0.01 the simpler variant wins.' }));
+  var vt = el('table', {});
+  var vhead = el('tr', {}, el('th', { text: 'Variant' }), el('th', { text: 'Walk-forward median error' }), el('th', { text: 'Walk-forward within 2x' }), el('th', { text: 'Blind median error' }), el('th', { text: 'Blind within 2x' }));
+  vt.appendChild(el('thead', {}, vhead));
+  var vbody = el('tbody', {});
+  DATA.variant_scores.forEach(function (s) {
+    vbody.appendChild(el('tr', { class: s.variant === DATA.winner ? 'winner' : '' },
+      el('td', { text: s.variant + ' — ' + s.label + (s.variant === DATA.winner ? ' (winner)' : '') }),
+      el('td', { text: s.wf_median.toFixed(4) }),
+      el('td', { text: (s.wf_within2 * 100).toFixed(1) + '%' }),
+      el('td', { text: s.blind_median.toFixed(4) }),
+      el('td', { text: (s.blind_within2 * 100).toFixed(1) + '%' })));
+  });
+  vt.appendChild(vbody);
+  v.appendChild(vt);
+  v.appendChild(el('p', { text: 'Winning model: ' + DATA.model_formula + '.' }));
+  v.appendChild(el('p', { text: 'Terms kept by the walk-forward test: ' + (DATA.selected_terms.length ? DATA.selected_terms.join(', ') : 'none — the size curve alone') + '. Each estimate is the median of 200 bootstrap refits, with a p10–p90 band and a rank range (10th–90th percentile of rank across refits).' }));
+  var cov = DATA.coverage;
+  var excl = Object.keys(cov.excluded_by_reason).map(function (k) { return k + ' ' + cov.excluded_by_reason[k]; }).join(', ');
+  v.appendChild(el('p', { class: 'muted', text: 'Coverage: ' + cov.total + ' protocols = ' + cov.board + ' on the board + ' + cov.token_recorded + ' recording a token + ' + cov.excluded + ' excluded (' + (excl || 'none') + ').' }));
 
-function rowHtml(r) {
-  return `<tr class="click" data-slug="${esc(r.slug)}"><td class="num">${r.rank}<div class="rankrange">${r.rank_lo}–${r.rank_hi}</div></td>` +
-    `<td class="l"><b>${esc(r.name)}</b> ${r.watchlist ? '<span class="watch">WATCHLIST</span>' : ''}<div class="band">${esc(r.slug)}</div></td>` +
-    `<td class="l hideS">${esc(r.category ?? '(none)')}</td><td class="num">${money(r.tvl)}</td>` +
-    `<td class="num"><b>${money(r.implied_p50)}</b><div class="band">${money(r.implied_p10)} – ${money(r.implied_p90)}</div></td>` +
-    `<td class="num">${money(r.net)}</td><td><span class="badge ${r.verdict}">${r.verdict}</span></td></tr>`;
-}
+  // ---- methodology --------------------------------------------------------------
+  var m = $('method');
+  m.appendChild(el('h2', { text: 'Methodology' }));
+  m.appendChild(el('p', { text: 'Comps: one per ticker (grouped by CoinGecko id, falling back to symbol; largest TVL per group), market cap above zero and TVL above zero — ' + DATA.n_comps + ' comps in this snapshot. Features are log10(TVL), seven-day growth clipped to [-90, 200] per cent (unreported counts as 0), age in years from the listing date to the snapshot date (median-imputed when unlisted), and the chain count.' }));
+  m.appendChild(el('p', { text: 'The board ranks every protocol that records no token and passes the house watchlist exclusions — category Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking, Restaked BTC or CEX; a version marker at the end of the name; a whole word wrapped, staked or staking; or an exchange name at the start — with no $50M floor. That is the whole board: no name is ever special-cased.' }));
+  m.appendChild(el('h3', { text: 'The farm plan, netted to the dollar' }));
+  var a = DATA.assumptions;
+  var part = Object.keys(a.participation).map(function (k) { return k + ' ' + (a.participation[k] * 100).toFixed(0) + '%'; }).join(', ');
+  var ul = el('ul', {},
+    el('li', { text: 'Horizon ' + a.horizon_weeks + ' weeks; the community is assumed to take a ' + (a.community_share * 100).toFixed(0) + '% share of the token.' }),
+    el('li', { text: 'Participation (the share of TVL assumed to farm): ' + part + '; ' + (a.default_participation * 100).toFixed(0) + '% for other categories. Competing capital = participation x TVL.' }),
+    el('li', { text: 'Deposit by TVL: ' + a.deposit_tiers + '.' }),
+    el('li', { text: 'Gross at the low end = p10 x community share x deposit / (deposit + competing capital). Fees = ' + a.fees + '. Hours = ' + a.farm_hours + '. Capital cost = ' + a.capital_cost + '.' }),
+    el('li', { text: 'Net = gross - fees - capital cost. Verdict farm when net is at least $200 and at least $25 an hour; thin when net is above $0; otherwise skip.' }),
+    el('li', { text: 'Break-even is the implied value at which the low-end gross exactly covers fees plus capital cost.' }));
+  m.appendChild(ul);
+  m.appendChild(el('p', { class: 'muted', text: 'Limits: the snapshot is one day (its as_of date); a protocol that records no token may still have one its record does not carry; growth and age are the snapshot\u2019s own figures, and the model cannot see what the snapshot does not record. Source: ' + DATA.source }));
 
-function detailHtml(r) {
-  const b = r.breakdown;
-  const factor = (label, v) => `<div class="factor"><span>${label}</span><span>×${v.toFixed(3)}</span></div>`;
-  return `<section class="detail" id="detail"><button class="close" id="closeDetail">Close</button>
-  <h2>${esc(r.name)}</h2>
-  <p class="sub">${esc(r.category ?? 'Uncategorised')} · ${esc(r.chains.join(', '))} · TVL ${moneyFull(r.tvl)}` +
-  `${r.change_7d !== null ? ` · 7d change ${r.change_7d.toFixed(1)}%` : ''}` +
-  `${r.no_token_days !== null ? ` · records no token for ${r.no_token_days} days (listed ${esc(r.listed_at)})` : ' · no listing date recorded'}${r.watchlist ? ' · on the house watchlist' : ''}</p>
-  <div class="grid">
-    <div><h3>How the value is built</h3>
-      <div class="factor"><span>Size-curve base</span><span>${moneyFull(b.base)}</span></div>
-      ${factor('Category factor', b.cat_factor)}${factor('Growth factor', b.growth_factor)}
-      ${factor('Age factor', b.age_factor)}${factor('Chains factor', b.chains_factor)}
-      <p>Bootstrap band (200 refits): <b>${money(r.implied_p10)} – ${money(r.implied_p90)}</b>, median ${money(r.implied_p50)}.
-      Rank ${r.rank} of ${meta.board_n}, rank range ${r.rank_lo}–${r.rank_hi}.</p></div>
-    <div><h3>Farm plan, netted</h3>
-      <p>Deposit ${moneyFull(r.deposit)} for ${meta.model.assumptions.horizon_weeks} weeks.
-      Gross at the band's low end ${moneyFull(r.gross_low)}, minus fees ${moneyFull(r.fees)} and capital cost ${moneyFull(r.capital_cost)}:
-      <b>net ${moneyFull(r.net)}</b>, $${r.usd_per_hour.toFixed(2)}/hour, break-even implied value ${moneyFull(r.break_even)}.
-      Verdict: <span class="badge ${r.verdict}">${r.verdict}</span></p></div>
-    <div><h3>Steps</h3><ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></div>
-  </div></section>`;
-}
+  // ---- filters ------------------------------------------------------------------
+  var cats = [];
+  rows.forEach(function (r) { if (r.category && cats.indexOf(r.category) < 0) cats.push(r.category); });
+  cats.sort();
+  var catSel = $('cat');
+  cats.forEach(function (c) { catSel.appendChild(el('option', { value: c, text: c })); });
 
-function methodology() {
-  const ex = meta.excluded.by_reason;
-  const reasonText = Object.entries(ex).map(([k, v]) => `${v} ${k}`).join(', ');
-  const a = meta.model.assumptions;
-  return `<section class="panel method"><h2>Methodology</h2>
-  <p><b>Model.</b> <code>${esc(meta.model.formula_text)}</code>, fitted on ${meta.comps_n} traded comps — one per ticker
-  (largest TVL per gecko id), each with market cap and TVL above zero — taken from this same snapshot, never from outside data.</p>
-  <p><b>Validation.</b> Walk-forward time-split (train on the oldest 50%, test the next 20%; then 70/15 and 85/15) plus five seeded
-  blind 75/25 holdouts; the metric is median |log10(predicted / actual)| with the share landing within a factor of two.
-  Term selection kept a term only when the walk-forward score improved by 0.005 or more. Bands and rank ranges come from
-  ${meta.model.bootstrap_refits} bootstrap refits, seeded, so two runs of the program write identical bytes.</p>
-  <p><b>Farm plans.</b> Each plan assumes a ${a.horizon_weeks}-week horizon, a ${(a.community_share * 100).toFixed(0)}% community allocation
-  valued at the low end of the band, category farming participation, a $${a.fee_per_chain} fee per chain plus 0.1% of the deposit,
-  capital at ${(a.capital_apr * 100).toFixed(0)}% APR and ${a.hours} hours of work. Net = gross − fees − capital cost;
-  verdict farm needs net ≥ $200 and ≥ $25/hour, thin is any positive net, otherwise skip.</p>
-  <p><b>Coverage.</b> All ${meta.snapshot_total} snapshot protocols are accounted for: ${meta.board_n} pre-token protocols on this board,
-  ${meta.anchors_n} protocols that record a token (${meta.comps_n} of them trade with a market cap and form the fitted comps), and
-  ${meta.excluded.total} tokenless protocols excluded as wrapped, staked, bridged or exchange products (${reasonText}).
-  The house watchlist is covered ${rows.filter((r) => r.watchlist).length}/40.</p></section>`;
-}
+  function filtered() {
+    var q = state.q.trim().toLowerCase();
+    return rows.filter(function (r) {
+      if (state.watch && !r.watchlist) return false;
+      if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.verdict !== 'all' && r.verdict !== state.verdict) return false;
+      if (q && r.name.toLowerCase().indexOf(q) < 0 && r.slug.toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
 
-function render() {
-  const list = filtered();
-  const detail = state.detail ? rows.find((r) => r.slug === state.detail) : null;
-  const win = meta.model.variants.find((v) => meta.model.name.startsWith(`Variant ${v.id}`));
-  const flat = meta.model.variants.find((v) => v.id === 'A');
-  main.innerHTML = `
-  <header class="top"><h1>Sightline <span class="rad">/ pre-token radar</span></h1>
-  <p class="tagline">Every protocol that records no token, priced by a model <b>fitted on the tokens that already trade</b> in the same snapshot —
-  kept only because it survived a walk-forward time-split and a blind holdout — with a farm plan netted to the dollar on every row.
-  Snapshot as of ${esc(meta.as_of)}.</p></header>
-  <div class="kpis">
-    <div class="kpi"><b>${meta.board_n}</b><span>protocols priced</span></div>
-    <div class="kpi"><b>${meta.comps_n}</b><span>traded comps anchors</span></div>
-    <div class="kpi"><b>${win.wf_median_err.toFixed(3)} vs ${flat.wf_median_err.toFixed(3)}</b><span>walk-forward error, winner vs flat</span></div>
-    <div class="kpi"><b>${rows.filter((r) => r.watchlist).length}/40</b><span>watchlist covered</span></div>
-    <div class="kpi"><b>${rows.filter((r) => r.verdict === 'farm').length}</b><span>plans verdict farm</span></div>
-  </div>
-  ${detail ? detailHtml(detail) : ''}
-  ${validationPanel()}
-  <div class="controls">
-    <input type="search" id="q" placeholder="Search name or slug" value="${esc(state.q)}">
-    <select id="cat"><option value="">All categories</option>${categories().map((c) => `<option ${c === state.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-    <select id="verdict"><option value="">Any verdict</option>${['farm', 'thin', 'skip'].map((v) => `<option ${v === state.verdict ? 'selected' : ''}>${v}</option>`).join('')}</select>
-    <label><input type="checkbox" id="watch" ${state.watch ? 'checked' : ''}> Watchlist only</label>
-    <label>Sort <select id="sort">${[['value', 'Implied value'], ['tvl', 'TVL'], ['net', 'Net $'], ['uph', '$/hour'], ['range', 'Narrowest rank range']].map(([k, l]) => `<option value="${k}" ${k === state.sort ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-    <span class="band">${list.length} of ${meta.board_n} rows</span>
-  </div>
-  <table><thead><tr><th>Rank</th><th class="l">Protocol</th><th class="l hideS">Category</th><th>TVL</th><th>Implied p50 (band)</th><th>Net $</th><th>Verdict</th></tr></thead>
-  <tbody>${list.map(rowHtml).join('')}</tbody></table>
-  ${methodology()}
-  <footer>Implied values are this board's own model output, not a prediction that a token will launch. Farm at your own risk.</footer>`;
-  main.setAttribute('aria-busy', 'false');
-  bind();
-}
+  function sortRows(list) {
+    var key = state.sort;
+    var dir = state.dir;
+    return list.slice().sort(function (a, b) {
+      var av = a[key];
+      var bv = b[key];
+      if (av === null || av === undefined) av = '';
+      if (bv === null || bv === undefined) bv = '';
+      var cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv));
+      if (cmp === 0) cmp = a.rank - b.rank;
+      return cmp * dir;
+    });
+  }
 
-function bind() {
-  const q = document.getElementById('q');
-  q.addEventListener('input', () => { state.q = q.value; refreshTable(); });
-  document.getElementById('cat').addEventListener('change', (e) => { state.cat = e.target.value; refreshTable(); });
-  document.getElementById('verdict').addEventListener('change', (e) => { state.verdict = e.target.value; refreshTable(); });
-  document.getElementById('watch').addEventListener('change', (e) => { state.watch = e.target.checked; refreshTable(); });
-  document.getElementById('sort').addEventListener('change', (e) => { state.sort = e.target.value; refreshTable(); });
-  const close = document.getElementById('closeDetail');
-  if (close) close.addEventListener('click', () => { state.detail = null; try { history.replaceState(null, '', location.pathname + location.search); } catch { /* file URLs */ } render(); });
-}
+  function renderTable() {
+    var list = sortRows(filtered());
+    var tbody = $('rows');
+    tbody.textContent = '';
+    list.forEach(function (r) {
+      var tr = el('tr', { class: state.selected === r.slug ? 'selected' : '', onClick: function () { select(r.slug, true); } },
+        el('td', { text: String(r.rank) }),
+        el('td', { class: 'name' }, el('b', { text: r.name }), document.createTextNode(' '), el('span', { class: 'slug', text: r.slug }), r.watchlist ? el('span', { class: 'watch', text: 'WATCH' }) : null),
+        el('td', { text: r.category || '—' }),
+        el('td', { text: fmtUsd(r.tvl_usd) }),
+        el('td', { text: fmtPct(r.change_7d) }),
+        el('td', { text: fmtUsd(r.implied_value_usd) }),
+        el('td', { text: fmtUsd(r.implied_p10) + ' – ' + fmtUsd(r.implied_p90) }),
+        el('td', { text: '#' + r.rank_lo + '–' + r.rank_hi }),
+        el('td', { text: fmtUsd(r.net) }),
+        el('td', { text: fmtUsd(r.usd_per_hour) }),
+        el('td', {}, el('span', { class: 'badge ' + r.verdict, text: r.verdict })));
+      tbody.appendChild(tr);
+    });
+    $('count').textContent = list.length + ' of ' + rows.length + ' protocols';
+  }
 
-function refreshTable() { render(); const q = document.getElementById('q'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+  // ---- detail -------------------------------------------------------------------
+  function select(slug, pushHash) {
+    var r = null;
+    rows.forEach(function (x) { if (x.slug === slug) r = x; });
+    state.selected = r ? r.slug : null;
+    var d = $('detail');
+    if (!r) {
+      d.hidden = true;
+      d.textContent = '';
+      renderTable();
+      return;
+    }
+    d.hidden = false;
+    d.textContent = '';
+    d.appendChild(el('button', { class: 'close', text: 'Close', onClick: function () { select(null, true); } }));
+    var h = el('h2', {}, document.createTextNode('#' + r.rank + ' ' + r.name + ' '), el('span', { class: 'slug', text: r.slug }));
+    d.appendChild(h);
+    d.appendChild(el('p', { class: 'muted', text: (r.category || 'Uncategorised') + ' · ' + r.chains.join(', ') + ' · TVL ' + fmtUsd(r.tvl_usd) + ' · 7-day change ' + fmtPct(r.change_7d) + (r.watchlist ? ' · on the house watchlist' : '') }));
+    var kv = el('div', { class: 'kv' },
+      el('div', {}, el('b', { text: fmtUsd(r.implied_value_usd) }), el('span', { text: 'Implied value (bootstrap median)' })),
+      el('div', {}, el('b', { text: fmtUsd(r.implied_p10) + ' – ' + fmtUsd(r.implied_p90) }), el('span', { text: 'Value band p10–p90' })),
+      el('div', {}, el('b', { text: '#' + r.rank_lo + '–' + r.rank_hi }), el('span', { text: 'Rank range across 200 refits' })),
+      el('div', {}, el('b', { text: fmtUsd(r.net) + ' net · ' + fmtUsd(r.usd_per_hour) + '/hr' }), el('span', { text: 'Farm plan, low end' })));
+    d.appendChild(kv);
+    d.appendChild(el('h3', { text: 'Farm plan — ' + r.verdict + ' (deposit ' + fmtUsd(r.deposit) + ', break-even ' + fmtUsd(r.breakeven) + ')' }));
+    var ol = el('ol', {});
+    r.farm_steps.forEach(function (s) { ol.appendChild(el('li', { text: s })); });
+    d.appendChild(ol);
+    d.appendChild(el('p', { class: 'muted', text: 'Gross at the low end ' + fmtUsd(r.gross_low) + ' · fees ' + fmtUsd(r.fees) + ' · capital cost ' + fmtUsd(r.capital_cost) + ' · ' + r.hours + ' hours over ' + DATA.assumptions.horizon_weeks + ' weeks.' }));
+    renderTable();
+    if (pushHash) {
+      try { history.replaceState(null, '', '#p=' + r.slug); } catch (e) { /* hash only */ }
+      d.scrollIntoView({ block: 'start' });
+    }
+  }
 
-document.addEventListener('click', (e) => {
-  const tr = e.target.closest('tr.click');
-  if (tr) { location.hash = `p=${tr.dataset.slug}`; }
-});
+  // ---- wiring -------------------------------------------------------------------
+  $('q').addEventListener('input', function (e) { state.q = e.target.value; renderTable(); });
+  catSel.addEventListener('change', function (e) { state.category = e.target.value; renderTable(); });
+  $('verdict').addEventListener('change', function (e) { state.verdict = e.target.value; renderTable(); });
+  $('watch').addEventListener('change', function (e) { state.watch = e.target.checked; renderTable(); });
+  document.querySelectorAll('#table thead th').forEach(function (th) {
+    th.addEventListener('click', function () {
+      var key = th.getAttribute('data-sort');
+      if (state.sort === key) state.dir = -state.dir;
+      else { state.sort = key; state.dir = key === 'name' || key === 'category' || key === 'verdict' ? 1 : -1; }
+      renderTable();
+    });
+  });
 
-function applyHash() {
-  const h = location.hash.slice(1);
-  const params = new URLSearchParams(h);
-  if (params.has('p')) { state.detail = params.get('p'); }
-  else if (params.has('cat')) { state.cat = params.get('cat'); state.detail = null; }
-  render();
-}
-window.addEventListener('hashchange', applyHash);
-applyHash();
+  function readHash() {
+    var h = window.location.hash.replace(/^#/, '');
+    var p = null;
+    var cat = null;
+    h.split('&').forEach(function (part) {
+      var kv = part.split('=');
+      if (kv[0] === 'p') p = decodeURIComponent(kv[1] || '');
+      if (kv[0] === 'cat') cat = decodeURIComponent(kv[1] || '');
+    });
+    if (cat && cats.indexOf(cat) >= 0) {
+      state.category = cat;
+      catSel.value = cat;
+    }
+    if (p) select(p, false);
+    else renderTable();
+  }
+  window.addEventListener('hashchange', readHash);
+
+  renderTable();
+  readHash();
+})();

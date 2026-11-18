@@ -1,48 +1,45 @@
 {
   "as_of": "2026-11-14",
-  "snapshot_total": 758,
-  "raw_comps": 128,
-  "comps_final": 128,
+  "comps": 128,
   "comps_with_listed_at": 95,
-  "comps_growth_imputed": 0,
-  "median_comp_age_years": 2.737850787132101,
-  "terms_kept_for_C": [
+  "n_wf_predictions": 48,
+  "n_blind_predictions": 160,
+  "winner": "C",
+  "selected_terms": [
     "growth"
   ],
-  "winner": "C",
-  "wf_test_predictions": 48,
-  "variants": [
+  "scores": [
     {
-      "id": "A",
-      "label": "Flat multiple — median mcap/TVL per category",
-      "wf_median_err": 0.7208006666689003,
-      "wf_within2x": 0.1875,
-      "blind_median_err": 0.7431555224374313,
-      "blind_within2x": 0.225
+      "variant": "A",
+      "label": "Median multiple per category",
+      "wf_median": 0.7208006666689002,
+      "wf_within2": 0.1875,
+      "blind_median": 0.6888060179017166,
+      "blind_within2": 0.19375
     },
     {
-      "id": "B",
-      "label": "Size curve — log-log OLS on TVL",
-      "wf_median_err": 0.47970773878053274,
-      "wf_within2x": 0.3125,
-      "blind_median_err": 0.6529948180378041,
-      "blind_within2x": 0.29375
+      "variant": "B",
+      "label": "Size curve (log-log OLS)",
+      "wf_median": 0.47970773874679207,
+      "wf_within2": 0.3125,
+      "blind_median": 0.507279035030157,
+      "blind_within2": 0.3625
     },
     {
-      "id": "C",
-      "label": "Size curve + terms kept by walk-forward selection",
-      "wf_median_err": 0.4469770548027595,
-      "wf_within2x": 0.22916666666666666,
-      "blind_median_err": 0.6706956499078649,
-      "blind_within2x": 0.25625
+      "variant": "C",
+      "label": "Size curve + walk-forward term selection",
+      "wf_median": 0.446977054817455,
+      "wf_within2": 0.22916666666666666,
+      "blind_median": 0.5554286533594182,
+      "blind_within2": 0.3375
     },
     {
-      "id": "D",
-      "label": "Ridge — standardised multi-factor, no category offsets",
-      "wf_median_err": 0.5525815832786893,
-      "wf_within2x": 0.25,
-      "blind_median_err": 0.6909057243920229,
-      "blind_within2x": 0.2125
+      "variant": "D",
+      "label": "Ridge multi-factor log-log",
+      "wf_median": 0.5507357113885756,
+      "wf_within2": 0.2708333333333333,
+      "blind_median": 0.5267625098665545,
+      "blind_within2": 0.3375
     }
   ]
 }
